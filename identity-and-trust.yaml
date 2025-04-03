@@ -1,0 +1,496 @@
+iam:
+  nameOverride: iam
+  extraConfigMap: |-
+    keyfile.json: |-
+      {
+        "kty": "OKP",
+        "d": "fcMKCbtj4f14DdZtiBCzPqRkGQPNmsl0nt3IwU1HtLg",
+        "use": "sig",
+        "crv": "Ed25519",
+        "kid": "z6MkqmaCT2JqdUtLeKah7tEVfNXtDXtQyj4yxEgV11Y5CqUa",
+        "x": "lqXp4SMT6En9uF130rLeNsan8-790AJ10RqeC7oQHe4",
+        "alg": "EdDSA"
+      }
+  keycloak:
+    nameOverride: iam-keycloak
+    image:
+      tag: 21.1.2-debian-11-r27
+    containerSecurityContext:
+      readOnlyRootFilesystem: false
+    initContainers:
+    - name: iam-keycloak-init
+      image: curlimages/curl:latest
+      imagePullPolicy: IfNotPresent
+      env:
+      - name: VCISSUER_ISSUER_DID
+        value: did:web:dataspace4health.local:wallet:api:wallet-api:registry:0
+      command: ["sh", "-c"]
+      args:
+        - |
+          # wait for waltid issuer to be available
+          url=https://$(echo $VCISSUER_ISSUER_DID | sed 's|did:web:||' | sed 's|:|/|g')/did.json
+          wait-for-url() {
+            echo "Testing $1"
+            timeout -s TERM 200 sh -c \
+            'while [[ "$(curl -k -s -o /dev/null -L -w ''%{http_code}'' ${0})" != "200" ]];\
+            do echo "Waiting for ${0}" && sleep 20;\
+            done' ${1}
+            echo "OK!"
+            curl -kI $1
+          }
+          wait-for-url ${url}
+    - name: iam-keycloak-vc-issuer-init
+      #image: quay.io/fiware/keycloak-vc-issuer:1.0.3
+      image: ds4h-registry:5432/fiware/keycloak-vc-issuer
+      imagePullPolicy: Always
+      volumeMounts:
+      - mountPath: /target
+        name: fiware-lib
+    command: ["sh", "-c"]
+    args:
+    - |
+      for f in /opt/dataspace4health.local/certs/*.pem; do
+        echo "Adding certificate $f to keystore"
+        certname=$(echo $(basename $f) | sed 's|.crt||g' )
+        mkdir -p /tmp/truststores
+        keytool -import -trustcacerts -noprompt -storepass changeit -alias $(basename $f) -file $f -keystore /tmp/truststores/cacerts
+      done
+
+      cp /opt/bitnami/keycloak/custom_providers/vc-issuer.jar /opt/bitnami/keycloak/providers/
+      cp /opt/bitnami/keycloak/custom_providers/WaltID-ServiceMatrix-*.jar /opt/bitnami/keycloak/providers/
+      cp /opt/bitnami/keycloak/custom_providers/waltid*.jar /opt/bitnami/keycloak/providers/
+      cp /opt/bitnami/keycloak/custom_providers/kotlin*.jar /opt/bitnami/keycloak/providers/
+      cp /opt/bitnami/keycloak/custom_providers/ktor*.jar /opt/bitnami/keycloak/providers/
+      cp /opt/bitnami/keycloak/custom_providers/tink-*.jar /opt/bitnami/keycloak/providers/
+      cp /opt/bitnami/keycloak/custom_providers/protobuf-*.jar /opt/bitnami/keycloak/providers/
+
+      JAVA_OPTS="-Djavax.net.ssl.trustStore=/tmp/truststores/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+      echo "Starting Keycloak"
+      JAVA_OPTS=${JAVA_OPTS} /opt/bitnami/scripts/keycloak/entrypoint.sh /opt/bitnami/scripts/keycloak/run.sh
+    auth:
+      adminUser: admin
+      adminPassword: "xfsc4Ntt!"
+    extraEnvVars:
+    - name: KEYCLOAK_EXTRA_ARGS
+      value: "--import-realm"
+    - name: PROXY_ADDRESS_FORWARDING
+      value: "true"
+    - name: VCISSUER_WALTID_ADDRESS
+      value: http://iat-issuer-api.default.svc.cluster.local
+    - name: VCISSUER_ISSUER_DID
+      value: did:web:dataspace4health.local:wallet:api:wallet-api:registry:0
+    - name: VCISSUER_ISSUER_KEY_FILE
+      value: /opt/keys/keyfile.json
+    extraVolumeMounts:
+    - name: config
+      mountPath: "/opt/bitnami/keycloak/data/import/iam-realm.json"
+      subPath: "iam-realm.json"
+      readOnly: true
+    - name: extra-config
+      mountPath: "/opt/keys/keyfile.json"
+      subPath: "keyfile.json"
+      readOnly: true
+    - name: fiware-lib
+      mountPath: "/opt/bitnami/keycloak/custom_providers/"
+    - name: fiware-data
+      mountPath: "/data"
+    - name: dataspace4health-local
+      mountPath: "/opt/dataspace4health.local/certs/dataspace4health.local.pem"
+      subPath: dataspace4health.local.pem
+      readOnly: true
+    extraVolumes:
+    - name: config
+      configMap:
+        name: iat-iam-keycloak-configmap
+        items:
+        - key: "iam-realm.json"
+          path: "iam-realm.json"
+    - name: extra-config
+      configMap:
+        name: iat-iam-extra-configmap
+        items:
+        - key: "keyfile.json"
+          path: "keyfile.json"
+    - name: fiware-lib
+    - name: fiware-data
+      emptyDir: {}
+    - name: dataspace4health-local
+      secret:
+        secretName: dataspace4health.local
+        items:
+          - key: ca.crt
+            path: dataspace4health.local.pem
+        defaultMode: 420
+    httpRelativePath: "/iam/"
+    logging:
+      level: "DEBUG,org.fiware:DEBUG"
+    resources:
+      limits:
+        memory: "1Gi" # default 768Mi
+    postgresql:
+      enabled: true
+      nameOverride: iam-postgresql
+      primary:
+        persistence:
+          size: 5Gi
+    ingress:
+      enabled: true
+      extraHosts:
+      - name: ""
+      pathType: Prefix
+      path: /iam
+      extraTls:
+        - secretName: dataspace4health.local
+          hosts:
+           - dataspace4health.local
+  clients:
+  - realm: ds4h
+    realmAdminUser: admin
+    realmAdminPass: xfsc4Ntt!
+    issuers:
+    - did: "did:web:dataspace4health.local:wallet:api:wallet-api:registry:0"
+      supportedVCTypes:
+      - type: "NaturalPerson"
+        format: "ldp_vc"
+        claims: "firstName,familyName,email,roles"
+      claims:
+      - vcType: "NaturalPerson"
+        claims: "firstName,familyName,email,roles"
+    identityProviders:
+    - alias: iat-idpkit
+      displayName: "Login with SSI"
+      clientName: keycloak
+      oidcDiscoveryUrl: https://dataspace4health.local/idp/api/oidc/.well-known/openid-configuration
+      clientRegisterUrl: http://iat-idp-api.default.svc.cluster.local:8080/api/oidc/clients/register
+      redirectUri: https://dataspace4health.local/iam/realms/ds4h/broker/iat-idpkit/endpoint
+      defaultScope: "openid profile email roles"
+idp-api:
+  nameOverride: idp-api
+  config:
+    persistance:
+      size: 100Mi
+    externalUrl: https://dataspace4health.local/idp
+    verifierUiUrl: https://dataspace4health.local/idp/ui/sharecredential?state=
+    verifierApiUrl: https://dataspace4health.local/idp/api/siop/default  # important! must be full url
+    walletUrl: /wallet/ui
+  ingress:
+    enabled: true
+    hosts:
+      - paths:
+        # Prevent access to path /oidc/clients
+        - path: /idp/webjars
+          port: 8080
+          pathType: Prefix
+        - path: /idp/api/swagger
+          port: 8080
+          pathType: Prefix
+        - path: /idp/api/api-documentation
+          port: 8080
+          pathType: Prefix
+        - path: /idp/api-routes
+          port: 8080
+          pathType: Prefix
+        - path: /idp/verifier-api
+          port: 8080
+          pathType: Prefix
+        - path: /idp/api/siop
+          port: 8080
+          pathType: Prefix
+        - path: /idp/api/oidc/.well-known
+          port: 8080
+          pathType: Prefix
+        - path: /idp/api/oidc/jwkSet
+          port: 8080
+          pathType: Prefix
+        - path: /idp/api/oidc/par
+          port: 8080
+          pathType: Prefix
+        - path: /idp/api/oidc/authorize
+          port: 8080
+          pathType: Prefix
+        - path: /idp/api/oidc/token
+          port: 8080
+          pathType: Prefix
+        - path: /idp/api/oidc/web-api
+          port: 8080
+          pathType: Prefix
+        - path: /idp/api/oidc/userInfo
+          port: 8080
+          pathType: Prefix
+        - path: /idp/api/nft
+          port: 8080
+          pathType: Prefix
+        - path: /idp/api/siwe
+          port: 8080
+          pathType: Prefix
+    replacePath:
+      regex: /idp(/|$)(.*)
+      replacement: /$2
+    replaceHeader:
+      header: Location
+      regex: /sharecredential(.*)
+      replacement: /idp/ui/sharecredential$1
+    replaceBody:
+      regex: (")?(href|src|url)(")?(=|:)(\s)?(")\/([^"]*)(")
+      replacement: $1$2$3$4$5$6/idp/$7$8
+      logLevel: -2
+      monitoring:
+        methods:
+        - GET
+        types:
+        - "*/*"
+        - text/html
+        - application/json
+    tls:
+      - secretName: dataspace4health.local
+        hosts:
+          - dataspace4health.local
+idp-ui:
+  nameOverride: idp-ui
+  config:
+    basePath: "/idp/ui"
+    apiUrl: "/idp"
+    verifierApiUrl: "/idp/verifier-api"
+  ingress:
+    enabled: true
+    hosts:
+      - paths:
+        - path: /idp/ui
+          port: 8080
+          pathType: Prefix
+    replacePath:
+      regex: /idp/ui(/|$)(.*)
+      replacement: /$2
+    replaceHeader:
+      header: Location
+      regex: https?://([^\/]+)/sharecredential(.*)
+    replacement: /idp/ui/sharecredential$2
+    tls:
+      - secretName: dataspace4health.local
+        hosts:
+          - dataspace4health.local
+wallet-api:
+  nameOverride: wallet-api
+  postgresql:
+    nameOverride: wallet-api-postgresql
+    enabled: true
+    auth:
+      postgresPassword: "xfsc4Ntt!"
+      database: vc-wallet-api
+      username: vc-wallet-api
+      password: "xfsc4Ntt!"
+    primary:
+      persistence:
+        enabled: true
+        size: 5Gi
+  vault:
+    nameOverride: wallet-api-vault
+    enabled: true
+  config:
+    walletUiPath: /wallet/ui
+    waltidCustodianUrl: http://iat-issuer-api.default.svc.cluster.local:7002
+    init:
+      account:
+        name: "NTT Data"
+        email: "wallet@ntt.com"
+        pass: "xfsc4Ntt!"
+    oidc:
+      publicBaseUrl: "https://dataspace4health.local/wallet/api"
+
+      providerName: keycloak
+      # Enter the realm URL
+      oidcRealm: "https://dataspace4health.local/iam/realms/ds4h"
+      # JWKS (to verify access keys the user claims to received through OIDC server)
+      oidcJwks: "${oidcRealm}/protocol/openid-connect/certs"
+      oidcScopes: ["openid", "roles"]
+
+      authorizeUrl: "${oidcRealm}/protocol/openid-connect/auth"
+      accessTokenUrl: "${oidcRealm}/protocol/openid-connect/token"
+      logoutUrl: "${oidcRealm}/protocol/openid-connect/logout"
+
+      clientId: "waltid_backend"
+      clientSecret: "__DEFAULT_KEYCLOAK_CLIENT_SECRET__"
+
+      # Keycloak authentication strategy
+      keycloakUserApi: "https://dataspace4health.local/iam/admin/realms/ds4h/users"
+
+      # JWKS is cached:
+      jwksCache:
+        cacheSize: 10
+        cacheExpirationHours: 24
+        rateLimit:
+          bucketSize: 10
+          refillRateMinutes: 1
+    registrationDefaults:
+      did:
+        domain: "dataspace4health.local"
+        path: "/wallet/api"
+      issuer:
+        name: "ntt-data"
+        description: "NTT Data Issuer"
+        uiEndpoint: "https://dataspace4health.local/portal/credentials?ids="
+        configurationEndpoint: "https://dataspace4health.local/issuer/api/.well-known/openid-credential-issuer"
+  ingress:
+    enabled: true
+    hosts:
+      - paths:
+        - path: /wallet/api
+          port: 8080
+          pathType: Prefix
+    replacePath:
+      regex: /wallet/api(/|$)(.*)
+      replacement: /$2
+    replaceHeader:
+      header: Location
+      regex: (/|^)swagger(.*)
+      replacement: /wallet/api/swagger$2
+    replaceBody:
+      regex: (")?url(")?(\s)?(:) "\/("|api\.json")
+      replacement: url $4 "/wallet/api/$5
+      logLevel: -2
+      monitoring:
+        methods:
+        - GET
+        types:
+        - "*/*"
+        - application/javascript
+        - application/json
+    tls:
+      - secretName: dataspace4health.local
+        hosts:
+          - dataspace4health.local
+issuer-api:
+  nameOverride: issuer-api
+  config:
+    persistance:
+      size: 100Mi
+    wallet:
+      url: "http://iat-wallet-api.default.svc.cluster.local:8080"
+      account:
+        email: "wallet@ntt.com"
+        pass: "xfsc4Ntt!"
+    issuer:
+      did: "did:web:dataspace4health.local:wallet:api:wallet-api:registry:0"
+      proofType: "LD_PROOF"
+      templatesFolder: "data/credential-store/templates"
+    vault:
+      url: http://iat-wallet-api-vault-server-headless.default.svc.cluster.local:8200
+      token: root
+    vcTemplates:
+    - name: NaturalPerson
+      value: |
+        {
+          "type": [
+            "VerifiableCredential",
+            "NaturalPerson"
+          ],
+          "@context": [
+            "https://www.w3.org/2018/credentials/v1"
+          ],
+          "id": "string",
+          "issuer": "string",
+          "issuanceDate": "timestamp",
+          "issued": "timestamp",
+          "validFrom": "timestamp",
+          "credentialSubject": {
+            "id": "string",
+            "firstName": "string",
+            "familyName": "string",
+            "email": "string",
+            "roles": "string"
+          }
+        }
+    http:
+      host: ""
+      ports:
+        - name: core
+          containerPort: 7000
+        - name: issuer
+          containerPort: 7001
+        - name: wallet
+          containerPort: 7002
+        - name: verifier
+          containerPort: 7003
+        - name: essif
+          containerPort: 7004
+        - name: oidc
+          containerPort: 7010
+      timeout:
+        idle: 120s
+        read: 10s
+        write: 10s
+  ingress:
+    enabled: false
+    hosts:
+      - paths:
+        # - path: /core/api
+        #   port: 7000
+        #   pathType: Prefix
+        - path: /issuer/api
+          port: 7001
+          pathType: Prefix
+        # - path: /wallet/api
+        #   port: 7002
+        #   pathType: Prefix
+        - path: /verifier/api
+          port: 7003
+          pathType: Prefix
+        # - path: /essif/api
+        #   port: 7004
+        #   pathType: Prefix
+        - path: /openid4vc/api
+          port: 7010
+          pathType: Prefix
+    replacePath:
+      regex: /(core|issuer|wallet|verifier|essif|openid4vc)/api(/|$)(.*)
+      replacement: /$3
+    replaceHeader:
+      header: Location
+      regex: (/|^)swagger(.*)
+      # replacement: ./api/swagger$2
+      replacement: /issuer/api/v1/swagger$2
+    replaceBody:
+      regex: (href=|src=|['"]?url['"]?:\s?)(['"])?\/(v1|api-routes)?([^'"]*)(['"])?
+      #replacement: $1$2${3:+.:..}/$3$4$5
+      #replacement: $1$2./$3$4$5
+      replacement: $1$2../$3$4$5
+      logLevel: -2
+      monitoring:
+        methods:
+        - GET
+        types:
+        - "*/*"
+        - text/html
+        - application/javascript
+        - application/json
+    tls:
+      - secretName: dataspace4health.local
+        hosts:
+          - dataspace4health.local
+wallet-ui:
+  nameOverride: wallet-ui
+  config:
+    basePath: /wallet/ui
+    issuer_callback_url: "https://dataspace4health.local/issuer/api"
+    wallet_api_url: "https://dataspace4health.local/wallet/api"
+  ingress:
+    enabled: true
+    hosts:
+      - paths:
+        - path: /wallet/ui
+          port: 8080
+          pathType: Prefix
+    replaceBody:
+      regex: (\/wallet-api\/)([^"]*)
+      replacement: https://dataspace4health.local/wallet/api$1$2
+      logLevel: -2
+      monitoring:
+        methods:
+        - GET
+        types:
+        - "*/*"
+        - text/javascript
+    tls:
+      - secretName: dataspace4health.local
+        hosts:
+          - dataspace4health.local

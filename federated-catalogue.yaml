@@ -1,0 +1,104 @@
+fcat-portal:
+  nameOverride: portal
+  keycloak:
+    enabled: false
+  image:
+    repository: ds4h-registry:5432/catalogue/fc-portal
+    pullPolicy: Always
+    tag: "latest"
+  service:
+    port: 8088
+  probes:
+    path: /catalogue/ui
+  extraEnv:
+    - name: PORT
+      value: "8088"
+    - name: NEXT_PUBLIC_FRONTEND_BASE_URL
+      value: /catalogue/ui
+    - name: NEXT_PUBLIC_API_BASE_URL
+      value: https://dataspace4health.local/catalogue/api
+    - name: NEXT_PUBLIC_OIDC_AUTHORITY
+      value: https://dataspace4health.local/iam/realms/ds4h
+    - name: NEXT_PUBLIC_OIDC_CLIENT_ID
+      value: federated-catalogue
+    - name: NEXT_PUBLIC_OIDC_CLIENT_SECRET
+      value: cf|J{G3z7a,@su5j(EJzq^G\$a6)4D9
+    - name: NEXT_PUBLIC_OIDC_GRANT_TYPE
+      value: authorization_code
+    - name: NEXT_PUBLIC_OIDC_REDIRECT_URI
+      value: https://dataspace4health.local/catalogue/ui/redirect
+    - name: NEXT_PUBLIC_OIDC_RESPONSE_TYPE
+      value: code
+    - name: NEXT_PUBLIC_OIDC_SCOPE
+      value: openid
+    - name: NEXT_PUBLIC_GAIAX_COMPLIANCE_URL
+      value: https://compliance.lab.gaia-x.eu/v1-staging/api/credential-offers
+  ingress:
+    enabled: true
+    hosts:
+    - host: null
+      paths:
+      - path: /catalogue/ui
+        pathType: Prefix
+    replaceBody:
+      regex: /_next/
+      replacement: /catalogue/ui/_next/
+      logLevel: -2
+      monitoring:
+        methods:
+        - GET
+        types:
+        - "*/*"
+        - text/html
+        - text/x-component
+    tls:
+    - secretName: dataspace4health.local
+      hosts:
+      - dataspace4health.local
+fcat-service:
+  nameOverride: service
+  postgresql:
+    nameOverride: service-postgresql
+  neo4j:
+    nameOverride: service-neo4j
+  keycloak:
+    enabled: false
+    nameOverride: service-keycloak
+    url: https://dataspace4health.local/iam/
+    realm: ds4h
+    jwtIssuer: https://dataspace4health.local/iam/realms/ds4h
+    client:
+      id: "federated-catalogue"
+      secret: "cf|J{G3z7a,@su5j(EJzq^G$a6)4D9"
+  service:
+    port: 8081
+  probes:
+    path: /catalogue/api/actuator/health
+  storage:
+    enabled: false
+  extraEnv:
+  - name: JAVA_OPTS
+    value: -Dlogging.level.eu.xfsc.fc=DEBUG
+  - name: SERVER_SERVLET_CONTEXT_PATH
+    value: /catalogue/api
+  - name: DATASTORE_FILE_PATH
+    value: /var/lib/fc-service/filestore
+  - name: FEDERATED_CATALOGUE_VERIFICATION_VC_SIGNATURE
+    value: "false"
+  - name: FEDERATED_CATALOGUE_VERIFICATION_VP_SIGNATURE
+    value: "false"
+  - name: GRAPHSTORE_QUERY_TIMEOUT_IN_SECONDS
+    value: "5"
+  # - name: LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY
+  #   value: DEBUG
+  ingress:
+    enabled: true
+    hosts:
+      - host: null
+        paths:
+          - path: /catalogue/api
+            pathType: Prefix
+    tls:
+      - secretName: dataspace4health.local
+        hosts:
+          - dataspace4health.local
